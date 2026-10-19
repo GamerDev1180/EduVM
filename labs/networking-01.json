@@ -1,0 +1,69 @@
+{
+  "id": "networking-01",
+  "title": "Networking: two hosts on a LAN",
+  "version": "1.0.0",
+  "level": "beginner",
+  "estimatedMinutes": 60,
+  "description": "Two Linux machines share a private network segment 'lan' with no DHCP. Configure static IPv4 addresses and prove they can reach each other.",
+  "objectives": [
+    "Read interface information with 'ip addr' and 'ip link'",
+    "Assign static IPv4 addresses and understand /24 subnets",
+    "Test connectivity with ping and diagnose failures"
+  ],
+  "ai": { "mode": "coach" },
+  "vms": [
+    {
+      "name": "pc1",
+      "guestOs": "linux",
+      "memoryMb": 768,
+      "baseImage": "debian-12-eduvm.qcow2",
+      "imageUrl": "https://example.org/eduvm/images/debian-12-eduvm.qcow2",
+      "segments": ["lan"]
+    },
+    {
+      "name": "pc2",
+      "guestOs": "linux",
+      "memoryMb": 768,
+      "baseImage": "debian-12-eduvm.qcow2",
+      "imageUrl": "https://example.org/eduvm/images/debian-12-eduvm.qcow2",
+      "segments": ["lan"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "pc1-address",
+      "title": "Give pc1 the address 10.0.0.1/24",
+      "instructions": "Each VM has two network cards: the first is for internet access, the second (usually ens4 or enp0s4) is connected to the 'lan' segment. Assign 10.0.0.1/24 to pc1's lan interface.",
+      "points": 15,
+      "hints": [
+        "List the interfaces with 'ip -br link'. The lan card is the one without an address.",
+        "The 'ip addr add' command takes an address in CIDR notation and a 'dev' argument. Don't forget to bring the link up."
+      ],
+      "checks": [
+        { "vm": "pc1", "description": "pc1 has 10.0.0.1/24", "command": "ip -4 -o addr show", "expectRegex": "inet 10\\.0\\.0\\.1/24" }
+      ]
+    },
+    {
+      "id": "pc2-address",
+      "title": "Give pc2 the address 10.0.0.2/24",
+      "instructions": "Do the same on pc2 with 10.0.0.2/24.",
+      "points": 15,
+      "checks": [
+        { "vm": "pc2", "description": "pc2 has 10.0.0.2/24", "command": "ip -4 -o addr show", "expectRegex": "inet 10\\.0\\.0\\.2/24" }
+      ]
+    },
+    {
+      "id": "connectivity",
+      "title": "Prove connectivity",
+      "instructions": "Make sure pc1 can ping pc2 and the other way around.",
+      "points": 20,
+      "hints": [
+        "If ping fails, check that both links are UP and the addresses are in the same subnet."
+      ],
+      "checks": [
+        { "vm": "pc1", "description": "pc1 reaches pc2", "command": "ping -c 2 -W 2 10.0.0.2", "timeoutSeconds": 15 },
+        { "vm": "pc2", "description": "pc2 reaches pc1", "command": "ping -c 2 -W 2 10.0.0.1", "timeoutSeconds": 15 }
+      ]
+    }
+  ]
+}

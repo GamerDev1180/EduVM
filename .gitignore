@@ -1,0 +1,6 @@
+build/
+out/
+.vs/
+.vscode/
+*.qcow2
+*.iso
