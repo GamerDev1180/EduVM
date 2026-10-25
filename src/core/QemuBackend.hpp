@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "core/GuestAgent.hpp"
 #include "core/HostInfo.hpp"
 #include "core/Settings.hpp"
 #include "core/VmConfig.hpp"
@@ -35,7 +34,7 @@ struct QemuLaunchSpec {
 
 std::vector<std::string> buildQemuArgs(const QemuLaunchSpec& spec);
 
-// Lab segments map onto QEMU multicast socket networking: no admin rights or
+// LAN segments map onto QEMU multicast socket networking: no admin rights or
 // TAP drivers needed, and every VM joined to the same group sees the others.
 int segmentMulticastPort(const std::string& segment);
 std::string deterministicMac(const std::string& vmName, size_t nicIndex);
@@ -50,8 +49,11 @@ public:
     std::optional<std::filesystem::path> qemuImgBinary() const;
 
     void createDisk(const std::filesystem::path& path, int sizeGb) const;
-    // Copy-on-write clone of a lab base image: instant, and tiny on disk.
-    void createOverlay(const std::filesystem::path& overlay, const std::filesystem::path& base) const;
+    // Imports/clones a disk: converts any format QEMU reads (vmdk, vdi, vhdx,
+    // qcow2, raw) into a standalone qcow2 file.
+    void convertToQcow2(const std::filesystem::path& source, const std::filesystem::path& dest) const;
+    int diskVirtualSizeGb(const std::filesystem::path& disk) const;
+    void expandDisk(const VmConfig& config, int newSizeGb) const;
 
     VmRuntime start(const VmConfig& config) const;
     void stop(const std::string& name, bool force) const;
@@ -63,8 +65,6 @@ public:
     void restoreSnapshot(const std::string& vmName, const std::string& snapshot) const;
     void deleteSnapshot(const std::string& vmName, const std::string& snapshot) const;
     std::vector<SnapshotInfo> listSnapshots(const std::string& vmName) const;
-
-    GuestAgent connectGuestAgent(const std::string& vmName) const;
 
 private:
     std::filesystem::path requireQemuImg() const;

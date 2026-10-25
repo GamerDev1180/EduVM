@@ -118,7 +118,7 @@ ResourceAdvice recommendResources(const HostInfo& host, int requestedCpus, int r
         }
     }
     if (host.accelerator == Accelerator::None) {
-        advice.warnings.push_back("No hardware acceleration: VMs will run in slow emulation mode. Run 'eduvm doctor'.");
+        advice.warnings.push_back("No hardware acceleration: VMs will run in slow emulation mode. See Help > System check.");
     }
     return advice;
 }

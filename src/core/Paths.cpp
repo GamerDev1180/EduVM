@@ -28,9 +28,6 @@ fs::path dataDir() {
 }
 
 fs::path vmsDir() { return ensureDir(dataDir() / "vms"); }
-fs::path labsDir() { return ensureDir(dataDir() / "labs"); }
-fs::path imagesDir() { return ensureDir(dataDir() / "images"); }
-fs::path progressDir() { return ensureDir(dataDir() / "progress"); }
 fs::path settingsFile() { return dataDir() / "settings.json"; }
 
 std::string readFile(const fs::path& p) {

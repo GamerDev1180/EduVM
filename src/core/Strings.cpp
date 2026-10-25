@@ -58,32 +58,6 @@ bool endsWith(std::string_view s, std::string_view suffix) {
     return s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix;
 }
 
-std::string base64Decode(std::string_view in) {
-    auto value = [](char c) -> int {
-        if (c >= 'A' && c <= 'Z') return c - 'A';
-        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-        if (c >= '0' && c <= '9') return c - '0' + 52;
-        if (c == '+') return 62;
-        if (c == '/') return 63;
-        return -1;
-    };
-    std::string out;
-    out.reserve(in.size() * 3 / 4);
-    int buffer = 0;
-    int bits = 0;
-    for (char c : in) {
-        int v = value(c);
-        if (v < 0) continue;  // skips '=', whitespace and newlines
-        buffer = (buffer << 6) | v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<char>((buffer >> bits) & 0xFF));
-        }
-    }
-    return out;
-}
-
 std::string nowIso8601() {
     std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm{};

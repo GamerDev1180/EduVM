@@ -2,6 +2,8 @@
 
 #include "core/Strings.hpp"
 
+#include <algorithm>
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -156,6 +158,53 @@ std::string TcpSocket::readLine() {
         if (n < 0) throw Error("Timed out waiting for a response");
         buffer_.append(chunk, static_cast<size_t>(n));
     }
+}
+
+void TcpSocket::readExact(void* dest, size_t n) {
+    if (fd_ == kInvalid) throw Error("readExact on closed socket");
+    char* out = static_cast<char*>(dest);
+    size_t fromBuffer = std::min(n, buffer_.size());
+    std::copy_n(buffer_.data(), fromBuffer, out);
+    buffer_.erase(0, fromBuffer);
+    size_t got = fromBuffer;
+    while (got < n) {
+#ifdef _WIN32
+        int r = ::recv(static_cast<SOCKET>(fd_), out + got, static_cast<int>(std::min<size_t>(n - got, 1 << 20)), 0);
+#else
+        ssize_t r = ::recv(fd_, out + got, n - got, 0);
+#endif
+        if (r == 0) throw Error("Connection closed by peer");
+        if (r < 0) throw Error("Timed out waiting for data");
+        got += static_cast<size_t>(r);
+    }
+}
+
+void TcpSocket::shutdownBoth() {
+    if (fd_ == kInvalid) return;
+#ifdef _WIN32
+    ::shutdown(static_cast<SOCKET>(fd_), SD_BOTH);
+#else
+    ::shutdown(fd_, SHUT_RDWR);
+#endif
+}
+
+int findFreePortInRange(int lo, int hi) {
+    ensureNetworking();
+    // Start at a random offset so two VMs started back to back rarely collide.
+    static unsigned counter = static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count());
+    int span = hi - lo + 1;
+    for (int i = 0; i < span; ++i) {
+        int port = lo + static_cast<int>((counter++ + static_cast<unsigned>(i)) % static_cast<unsigned>(span));
+        auto s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(static_cast<unsigned short>(port));
+        bool ok = bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+        closeSocket(s);
+        if (ok) return port;
+    }
+    throw Error("No free TCP port between " + std::to_string(lo) + " and " + std::to_string(hi));
 }
 
 int findFreePort() {

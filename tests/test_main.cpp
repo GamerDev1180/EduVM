@@ -7,9 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "core/AiTutor.hpp"
-#include "core/Grader.hpp"
-#include "core/Lab.hpp"
+#include "core/OsDetect.hpp"
 #include "core/Paths.hpp"
 #include "core/Process.hpp"
 #include "core/QemuBackend.hpp"
@@ -64,11 +62,6 @@ TEST(versions_compare_numerically) {
     CHECK(compareVersions("2.0.0-beta", "2.0.0") == 0);
 }
 
-TEST(base64_decodes_guest_agent_output) {
-    CHECK(base64Decode("aGVsbG8gd29ybGQK") == "hello world\n");
-    CHECK(base64Decode("") == "");
-}
-
 TEST(vm_names_are_validated) {
     CHECK(isValidVmName("ubuntu-server_01"));
     CHECK(!isValidVmName(""));
@@ -81,10 +74,14 @@ TEST(vm_config_roundtrips_through_json) {
     VmConfig c;
     c.name = "web1";
     c.guestOs = GuestOs::Windows;
+    c.displayName = "Web Server 1";
     c.segments = {"lab/lan"};
     c.display = DisplayMode::Headless;
+    c.nat = false;
     VmConfig back = nlohmann::json(c).get<VmConfig>();
     CHECK(back.name == "web1");
+    CHECK(vmTitle(back) == "Web Server 1");
+    CHECK(!back.nat);
     CHECK(back.guestOs == GuestOs::Windows);
     CHECK(back.display == DisplayMode::Headless);
     CHECK(back.segments.size() == 1 && back.segments[0] == "lab/lan");
@@ -96,7 +93,9 @@ TEST(qemu_args_use_acceleration_with_tcg_fallback) {
     spec.diskPath = "disk.qcow2";
     spec.config.name = "srv";
     spec.config.segments = {"lab1/lan"};
-    spec.runtime = {0, 4444, 5555, 2222, ""};
+    spec.runtime.qmpPort = 4444;
+    spec.runtime.sshPort = 2222;
+    spec.runtime.vncPort = 5907;
     spec.accelerator = Accelerator::Whpx;
     auto args = buildQemuArgs(spec);
 
@@ -105,6 +104,8 @@ TEST(qemu_args_use_acceleration_with_tcg_fallback) {
     CHECK(contains(args, "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22"));
     CHECK(contains(args, "tcp:127.0.0.1:4444,server=on,wait=off"));
     CHECK(contains(args, "file=disk.qcow2,format=qcow2,if=virtio"));
+    CHECK(contains(args, "127.0.0.1:7"));  // embedded display: VNC display 7 = port 5907
+    CHECK(contains(args, "none"));
     bool hasSegment = std::any_of(args.begin(), args.end(), [](const std::string& s) { return startsWith(s, "socket,id=seg0,mcast=230.0.0.1:"); });
     CHECK(hasSegment);
 }
@@ -115,7 +116,9 @@ TEST(windows_guests_get_compatible_devices) {
     spec.diskPath = "disk.qcow2";
     spec.config.name = "win";
     spec.config.guestOs = GuestOs::Windows;
+    spec.config.display = DisplayMode::Window;
     auto args = buildQemuArgs(spec);
+    CHECK(!contains(args, "-vnc"));
     CHECK(contains(args, "file=disk.qcow2,format=qcow2,if=ide"));
     CHECK(std::any_of(args.begin(), args.end(), [](const std::string& s) { return startsWith(s, "e1000,netdev=net0"); }));
     CHECK(contains(args, "base=localtime"));
@@ -138,117 +141,45 @@ TEST(windows_command_line_quoting) {
 }
 #endif
 
-const char* kLab = R"({
-  "id": "t1", "title": "Test", "vms": [{"name": "srv"}],
-  "ai": {"mode": "coach", "maxQuestionsPerTask": 2},
-  "tasks": [{"id": "a", "title": "A", "checks": [{"command": "true"}]}]
-})";
-
-TEST(lab_parses_and_fills_defaults) {
-    Lab lab = Lab::parse(kLab);
-    CHECK(lab.id == "t1");
-    CHECK(lab.tasks[0].checks[0].vm == "srv");          // single-VM labs may omit vm
-    CHECK(lab.tasks[0].checks[0].expectExitCode == 0);  // default expectation
-    CHECK(lab.instanceName(lab.vms[0]) == "t1--srv");
-    CHECK(lab.segmentName("lan") == "t1/lan");
-    CHECK(lab.ai.maxQuestionsPerTask == 2);
+TEST(nat_off_without_segments_disables_networking) {
+    QemuLaunchSpec spec;
+    spec.qemuBinary = "qemu-system-x86_64";
+    spec.diskPath = "disk.qcow2";
+    spec.config.name = "isolated";
+    spec.config.nat = false;
+    auto args = buildQemuArgs(spec);
+    CHECK(!std::any_of(args.begin(), args.end(), [](const std::string& s) { return startsWith(s, "user,"); }));
+    CHECK(contains(args, "-nic"));
 }
 
-TEST(lab_validation_rejects_mistakes) {
-    CHECK_THROWS(Lab::parse("not json"));
-    CHECK_THROWS(Lab::parse(R"({"id":"x","title":"x","vms":[]})"));
-    CHECK_THROWS(Lab::parse(R"({"id":"x","title":"x","vms":[{"name":"a"},{"name":"b"}],
-                                "tasks":[{"id":"t","title":"t","checks":[{"command":"true"}]}]})"));
-    CHECK_THROWS(Lab::parse(R"({"id":"x","title":"x","vms":[{"name":"a","guestOs":"dos"}]})"));
+TEST(slugify_makes_folder_safe_ids) {
+    CHECK(slugify("Ubuntu Server 24.04") == "Ubuntu-Server-24-04");
+    CHECK(slugify("  ") == "vm");
+    CHECK(slugify("Windows 11 (test)") == "Windows-11-test");
+    CHECK(isValidVmName(slugify("Ünïcødé name!")));
 }
 
-TEST(sample_labs_are_valid) {
-    for (auto& entry : std::filesystem::directory_iterator("labs")) {
-        if (entry.path().extension() != ".json") continue;
-        try {
-            Lab::loadFile(entry.path());
-        } catch (const std::exception& e) {
-            std::cerr << "  " << pathToUtf8(entry.path()) << ": " << e.what() << "\n";
-            ++failures;
-        }
-    }
+TEST(os_is_detected_from_iso_names) {
+    auto ubuntu = guessOsFromIso("C:/isos/ubuntu-24.04.1-desktop-amd64.iso");
+    CHECK(ubuntu.detected && ubuntu.os == GuestOs::Linux);
+    CHECK(ubuntu.name == "Ubuntu 24.04.1");
+    CHECK(ubuntu.memoryMb == 4096);
+
+    auto win = guessOsFromIso("Win11_24H2_English_x64.iso");
+    CHECK(win.detected && win.os == GuestOs::Windows && win.name == "Windows 11");
+    CHECK(guessOsFromIso("en-us_windows_server_2022.iso").name == "Windows Server 2022");
+
+    auto alpine = guessOsFromIso("alpine-virt-3.20.3-x86_64.iso");
+    CHECK(alpine.os == GuestOs::Linux && alpine.memoryMb == 1024);
+
+    CHECK(!guessOsFromIso("mystery.iso").detected);
 }
 
-TEST(grader_evaluates_expectations) {
-    LabCheck c;
-    c.description = "perm";
-    c.expectExitCode = 0;
-    c.expectOutput = "770";
-    CHECK(evaluateCheck(c, {0, "770\n", "", false}).passed);
-    CHECK(!evaluateCheck(c, {0, "755\n", "", false}).passed);
-    CHECK(!evaluateCheck(c, {1, "770", "", false}).passed);
-    CHECK(!evaluateCheck(c, {0, "", "", true}).passed);
-
-    LabCheck r;
-    r.expectRegex = "^inet 10\\.0\\.0\\.[0-9]+";
-    CHECK(evaluateCheck(r, {0, "inet 10.0.0.5/24", "", false}).passed);
-    CHECK(!evaluateCheck(r, {0, "inet 192.168.1.5/24", "", false}).passed);
-}
-
-TEST(tutor_respects_lab_policy) {
-    Settings s;
-    s.tutorMode = "explain";
-    LabAiPolicy locked;
-    locked.mode = "coach";
-    CHECK(AiTutor::effectiveMode(s, &locked) == TutorMode::Coach);
-    CHECK(AiTutor::effectiveMode(s, nullptr) == TutorMode::Explain);
-
-    LabAiPolicy exam;
-    exam.examMode = true;
-    CHECK_THROWS(AiTutor::effectiveMode(s, &exam));
-    s.aiEnabled = false;
-    CHECK_THROWS(AiTutor::effectiveMode(s, nullptr));
-}
-
-TEST(tutor_request_shape) {
-    Settings s;
-    AiTutor tutor(s);
-    Lab lab = Lab::parse(kLab);
-    TutorContext ctx;
-    ctx.lab = &lab;
-    ctx.task = &lab.tasks[0];
-    auto req = tutor.buildRequest(TutorMode::Coach, ctx, nlohmann::json::array({{{"role", "user"}, {"content", "hi"}}}));
-    CHECK(req["model"] == "claude-opus-5-5");
-    CHECK(req["output_config"]["effort"] == "low");
-    CHECK(req["fallbacks"] == "default");
-    CHECK(!req.contains("thinking"));
-    CHECK(req["system"].size() == 2);
-    CHECK(req["system"][1].contains("cache_control"));
-    CHECK(req["system"][0]["text"].get<std::string>().find("COACH") != std::string::npos);
-
-    std::string turn = AiTutor::userTurn("why?", ctx);
-    CHECK(turn.find("<current_task id=\"a\">") != std::string::npos);
-    CHECK(endsWith(turn, "why?"));
-}
-
-TEST(tutor_parses_responses) {
-    auto ok = AiTutor::parseResponse(200, R"({"content":[{"type":"thinking","thinking":""},{"type":"text","text":"Try ls -l"}],
-                                             "stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}})");
-    CHECK(ok.text == "Try ls -l");
-    CHECK(!ok.refused);
-    CHECK(ok.outputTokens == 5);
-
-    auto refused = AiTutor::parseResponse(200, R"({"content":[],"stop_reason":"refusal","stop_details":null})");
-    CHECK(refused.refused);
-
-    CHECK(AiTutor::parseResponse(200, R"({"content":[{"type":"text","text":"x"}],"stop_reason":"max_tokens"})").truncated);
-    CHECK_THROWS(AiTutor::parseResponse(401, R"({"type":"error","error":{"type":"authentication_error","message":"bad"}})"));
-}
-
-TEST(update_and_catalog_parsing) {
+TEST(update_parsing) {
     auto info = parseReleaseJson(R"({"tag_name":"v0.2.0","html_url":"https://x","body":"notes"})", "0.1.0");
     CHECK(info.available);
     CHECK(info.latestVersion == "0.2.0");
     CHECK(!parseReleaseJson(R"({"tag_name":"v0.1.0"})", "0.1.0").available);
-
-    auto cat = parseLabCatalog(R"({"labs":[{"id":"a","url":"https://x/a.json","version":"1.1.0"}]})");
-    CHECK(cat.size() == 1 && cat[0].version == "1.1.0");
-    CHECK_THROWS(parseLabCatalog("{}"));
 }
 
 int main() {

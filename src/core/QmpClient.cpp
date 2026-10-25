@@ -8,6 +8,7 @@ namespace eduvm {
 
 void QmpClient::connect(int port) {
     socket_.connect("127.0.0.1", port, std::chrono::seconds(3));
+    socket_.setReadTimeout(std::chrono::seconds(3));  // a stuck QEMU must not freeze the caller
     json greeting = json::parse(socket_.readLine());
     if (!greeting.contains("QMP")) throw Error("Unexpected QMP greeting");
     execute("qmp_capabilities");

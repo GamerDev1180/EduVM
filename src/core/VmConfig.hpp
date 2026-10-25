@@ -15,7 +15,8 @@ enum class DisplayMode {
 
 // Persistent definition of one VM (vm.json).
 struct VmConfig {
-    std::string name;
+    std::string name;         // folder-safe id, e.g. "ubuntu-server"
+    std::string displayName;  // what the user typed, e.g. "Ubuntu Server 24.04"
     std::string description;
     GuestOs guestOs = GuestOs::Linux;
     std::string arch = "x86_64";
@@ -23,14 +24,14 @@ struct VmConfig {
     int memoryMb = 2048;
     int diskGb = 20;
     std::string diskFile = "disk.qcow2";  // relative to the VM folder
-    std::string isoPath;                   // optional install media
+    std::string isoPath;                   // CD/DVD drive; empty = no disc
     DisplayMode display = DisplayMode::Embedded;
     std::string cpuModel;                  // empty = pick per accelerator
-    bool forwardSsh = true;                // host 127.0.0.1:<port> -> guest :22
-    // Lab network segments. VMs sharing a segment name are on the same
-    // virtual switch, so students can build real multi-host networks.
+    bool nat = true;                       // network adapter with internet access (NAT)
+    bool forwardSsh = true;                // NAT only: host 127.0.0.1:<port> -> guest :22
+    // LAN segments: VMs that share a segment name are on the same private
+    // virtual switch (like VMware LAN segments). No admin rights needed.
     std::vector<std::string> segments;
-    std::string labId;                     // set when the VM belongs to a lab
     std::string createdAt;
 };
 
@@ -38,7 +39,6 @@ struct VmConfig {
 struct VmRuntime {
     long pid = 0;
     int qmpPort = 0;
-    int qgaPort = 0;
     int sshPort = 0;
     int vncPort = 0;  // only for DisplayMode::Embedded
     std::string startedAt;
@@ -49,8 +49,12 @@ GuestOs guestOsFromString(const std::string& s);
 std::string toString(DisplayMode d);
 DisplayMode displayModeFromString(const std::string& s);
 
-// VM names become folder names and QEMU arguments: keep them boring.
+// VM ids become folder names and QEMU arguments: keep them boring.
 bool isValidVmName(const std::string& name);
+// "Ubuntu Server 24.04" -> "Ubuntu-Server-24-04"
+std::string slugify(const std::string& displayName);
+// Name to show in the UI.
+inline const std::string& vmTitle(const VmConfig& c) { return c.displayName.empty() ? c.name : c.displayName; }
 
 void to_json(nlohmann::json& j, const VmConfig& c);
 void from_json(const nlohmann::json& j, VmConfig& c);

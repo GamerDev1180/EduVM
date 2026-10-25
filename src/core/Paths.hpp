@@ -12,9 +12,6 @@ namespace eduvm {
 std::filesystem::path dataDir();
 
 std::filesystem::path vmsDir();       // one sub-folder per VM
-std::filesystem::path labsDir();      // installed lab manifests
-std::filesystem::path imagesDir();    // shared base images used by labs
-std::filesystem::path progressDir();  // student progress + tutor history
 std::filesystem::path settingsFile();
 
 // Reads/writes a whole file. Writes are atomic (temp file + rename) so a crash

@@ -1,7 +1,6 @@
 #include "core/Http.hpp"
 
 #include <cstdint>
-#include <fstream>
 #include <memory>
 
 #include "core/Strings.hpp"
@@ -121,24 +120,6 @@ HttpResponse httpRequest(const std::string& method, const std::string& url, cons
     return resp;
 }
 
-void httpDownload(const std::string& url, const fs::path& dest, const ProgressFn& progress) {
-    OpenRequest r = openRequest("GET", url, {}, {});
-    if (r.status != 200) throw Error("Download failed with HTTP " + std::to_string(r.status) + ": " + url);
-    fs::path tmp = dest;
-    tmp += ".part";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) throw Error("Cannot write " + pathToUtf8(tmp));
-        std::uint64_t done = 0;
-        readBody(r.request.get(), [&](const std::string& chunk) {
-            out.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-            done += chunk.size();
-            if (progress) progress(done, r.contentLength);
-        });
-    }
-    fs::rename(tmp, dest);
-}
-
 #else  // libcurl
 
 namespace {
@@ -151,21 +132,6 @@ struct CurlGlobal {
 size_t appendToString(char* ptr, size_t size, size_t nmemb, void* userdata) {
     static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
     return size * nmemb;
-}
-
-size_t appendToFile(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    static_cast<std::ofstream*>(userdata)->write(ptr, static_cast<std::streamsize>(size * nmemb));
-    return size * nmemb;
-}
-
-struct ProgressCtx {
-    const ProgressFn* fn;
-};
-
-int onProgress(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t) {
-    auto* ctx = static_cast<ProgressCtx*>(clientp);
-    if (ctx->fn && *ctx->fn) (*ctx->fn)(static_cast<std::uint64_t>(dlnow), static_cast<std::uint64_t>(dltotal));
-    return 0;
 }
 
 }  // namespace
@@ -200,30 +166,6 @@ HttpResponse httpRequest(const std::string& method, const std::string& url, cons
     curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
     resp.status = static_cast<int>(status);
     return resp;
-}
-
-void httpDownload(const std::string& url, const fs::path& dest, const ProgressFn& progress) {
-    static CurlGlobal global;
-    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-    fs::path tmp = dest;
-    tmp += ".part";
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) throw Error("Cannot write " + pathToUtf8(tmp));
-
-    ProgressCtx ctx{&progress};
-    curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, kUserAgent);
-    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl.get(), CURLOPT_FAILONERROR, 1L);
-    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, appendToFile);
-    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &out);
-    curl_easy_setopt(curl.get(), CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl.get(), CURLOPT_XFERINFOFUNCTION, onProgress);
-    curl_easy_setopt(curl.get(), CURLOPT_XFERINFODATA, &ctx);
-    CURLcode rc = curl_easy_perform(curl.get());
-    out.close();
-    if (rc != CURLE_OK) throw Error("Download failed: " + std::string(curl_easy_strerror(rc)));
-    fs::rename(tmp, dest);
 }
 
 #endif

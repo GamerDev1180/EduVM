@@ -12,6 +12,8 @@ namespace eduvm {
 class QmpClient {
 public:
     void connect(int port);
+    // Commands such as savevm can legitimately take a long time.
+    void setTimeout(std::chrono::milliseconds t) { socket_.setReadTimeout(t); }
     nlohmann::json execute(const std::string& command, const nlohmann::json& arguments = nlohmann::json::object());
     // Runs a human-monitor (HMP) command; used for savevm/loadvm which have no
     // stable QMP equivalent yet. Returns the textual output.

@@ -75,9 +75,11 @@ std::vector<std::string> buildQemuArgs(const QemuLaunchSpec& spec) {
     if (!c.isoPath.empty()) a.insert(a.end(), {"-cdrom", c.isoPath, "-boot", "order=dc,menu=on"});
 
     const std::string nicModel = windowsGuest ? "e1000" : "virtio-net-pci";
-    std::string userNet = "user,id=net0";
-    if (spec.runtime.sshPort > 0) userNet += ",hostfwd=tcp:127.0.0.1:" + std::to_string(spec.runtime.sshPort) + "-:22";
-    a.insert(a.end(), {"-netdev", userNet, "-device", nicModel + ",netdev=net0,mac=" + deterministicMac(c.name, 0)});
+    if (c.nat) {
+        std::string userNet = "user,id=net0";
+        if (spec.runtime.sshPort > 0) userNet += ",hostfwd=tcp:127.0.0.1:" + std::to_string(spec.runtime.sshPort) + "-:22";
+        a.insert(a.end(), {"-netdev", userNet, "-device", nicModel + ",netdev=net0,mac=" + deterministicMac(c.name, 0)});
+    }
 
     for (size_t i = 0; i < c.segments.size(); ++i) {
         std::string id = "seg" + std::to_string(i);
@@ -85,12 +87,9 @@ std::vector<std::string> buildQemuArgs(const QemuLaunchSpec& spec) {
                              ",localaddr=127.0.0.1";
         a.insert(a.end(), {"-netdev", netdev, "-device", nicModel + ",netdev=" + id + ",mac=" + deterministicMac(c.name, i + 1)});
     }
+    if (!c.nat && c.segments.empty()) a.insert(a.end(), {"-nic", "none"});  // otherwise QEMU adds a default NIC
 
     a.insert(a.end(), {"-qmp", "tcp:127.0.0.1:" + std::to_string(spec.runtime.qmpPort) + ",server=on,wait=off"});
-    a.insert(a.end(), {"-chardev",
-                       "socket,id=qga0,host=127.0.0.1,port=" + std::to_string(spec.runtime.qgaPort) + ",server=on,wait=off",
-                       "-device", "virtio-serial", "-device",
-                       "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0"});
 
     a.insert(a.end(), {"-usb", "-device", "usb-tablet"});  // absolute pointer: no mouse grabbing
     if (windowsGuest) a.insert(a.end(), {"-rtc", "base=localtime"});
@@ -125,7 +124,7 @@ std::optional<fs::path> QemuBackend::qemuImgBinary() const { return findExecutab
 
 fs::path QemuBackend::requireQemuImg() const {
     auto img = qemuImgBinary();
-    if (!img) throw Error("qemu-img not found. Install QEMU or set its folder with 'eduvm config set qemuDir <path>'.");
+    if (!img) throw Error("qemu-img not found. Install QEMU or set its folder in Settings.");
     return *img;
 }
 
@@ -135,11 +134,25 @@ void QemuBackend::createDisk(const fs::path& path, int sizeGb) const {
     if (r.exitCode != 0) throw Error("qemu-img create failed: " + trim(r.output));
 }
 
-void QemuBackend::createOverlay(const fs::path& overlay, const fs::path& base) const {
-    if (!fs::exists(base)) throw Error("Base image not found: " + pathToUtf8(base));
-    auto r = runAndCapture({pathToUtf8(requireQemuImg()), "create", "-f", "qcow2", "-F", "qcow2", "-b",
-                            pathToUtf8(fs::absolute(base)), pathToUtf8(overlay)});
-    if (r.exitCode != 0) throw Error("qemu-img create (overlay) failed: " + trim(r.output));
+void QemuBackend::convertToQcow2(const fs::path& source, const fs::path& dest) const {
+    if (!fs::exists(source)) throw Error("Disk image not found: " + pathToUtf8(source));
+    // qemu-img detects the source format (vmdk, vdi, vhdx, qcow2, raw...).
+    auto r = runAndCapture({pathToUtf8(requireQemuImg()), "convert", "-O", "qcow2", pathToUtf8(source), pathToUtf8(dest)});
+    if (r.exitCode != 0) throw Error("Could not convert the disk image: " + trim(r.output));
+}
+
+int QemuBackend::diskVirtualSizeGb(const fs::path& disk) const {
+    auto r = runAndCapture({pathToUtf8(requireQemuImg()), "info", "-U", "--output=json", pathToUtf8(disk)});
+    if (r.exitCode != 0) throw Error("qemu-img info failed: " + trim(r.output));
+    long long bytes = json::parse(r.output).value("virtual-size", 0LL);
+    return static_cast<int>((bytes + (1LL << 30) - 1) >> 30);
+}
+
+void QemuBackend::expandDisk(const VmConfig& config, int newSizeGb) const {
+    if (repo_.loadRuntime(config.name)) throw Error("Shut down the VM before expanding its disk.");
+    if (newSizeGb <= config.diskGb) throw Error("Disks can only grow. Choose a size larger than " + std::to_string(config.diskGb) + " GB.");
+    auto r = runAndCapture({pathToUtf8(requireQemuImg()), "resize", pathToUtf8(repo_.diskPath(config)), std::to_string(newSizeGb) + "G"});
+    if (r.exitCode != 0) throw Error("Could not expand the disk: " + trim(r.output));
 }
 
 VmRuntime QemuBackend::start(const VmConfig& config) const {
@@ -148,7 +161,7 @@ VmRuntime QemuBackend::start(const VmConfig& config) const {
     auto binary = qemuSystemBinary(config.arch);
     if (!binary) {
         throw Error("qemu-system-" + config.arch +
-                    " not found. Install QEMU (https://www.qemu.org/download/) or run 'eduvm doctor'.");
+                    " not found. Install QEMU (https://www.qemu.org/download/) or open Help > System check.");
     }
     fs::path disk = repo_.diskPath(config);
     if (!fs::exists(disk)) throw Error("Disk image missing: " + pathToUtf8(disk));
@@ -157,8 +170,7 @@ VmRuntime QemuBackend::start(const VmConfig& config) const {
 
     VmRuntime rt;
     rt.qmpPort = findFreePort();
-    rt.qgaPort = findFreePort();
-    rt.sshPort = config.forwardSsh ? findFreePort() : 0;
+    rt.sshPort = config.nat && config.forwardSsh ? findFreePort() : 0;
     rt.vncPort = config.display == DisplayMode::Embedded ? findFreePortInRange(5901, 6999) : 0;
     rt.startedAt = nowIso8601();
 
@@ -252,12 +264,32 @@ VmState QemuBackend::state(const std::string& name) const {
 
 // Running VMs get live snapshots (RAM + devices, resume exactly where you
 // were). Stopped VMs get disk-only snapshots via qemu-img.
+// The writable disk of a running VM, as QEMU's block layer names it.
+static std::string runningDiskDevice(QmpClient& qmp) {
+    for (auto& dev : qmp.execute("query-block")) {
+        if (dev.contains("inserted") && !dev["inserted"].value("ro", true)) return dev.value("device", std::string());
+    }
+    throw Error("Could not find the VM's disk");
+}
+
+// Running VMs get a full snapshot (memory + disk) when the accelerator allows
+// it. WHPX cannot save memory state, so there we take a consistent disk-only
+// snapshot of the running VM instead. Stopped VMs use qemu-img.
 void QemuBackend::createSnapshot(const std::string& vmName, const std::string& snapshot) const {
     if (!isValidVmName(snapshot)) throw Error("Snapshot names may contain letters, digits, - and _ only.");
     if (auto rt = repo_.loadRuntime(vmName)) {
         QmpClient qmp;
         qmp.connect(rt->qmpPort);
-        qmp.humanCommand("savevm " + snapshot);
+        qmp.setTimeout(std::chrono::minutes(2));
+        if (host_.accelerator != Accelerator::Whpx) {
+            try {
+                qmp.humanCommand("savevm " + snapshot);
+                return;
+            } catch (const Error&) {
+                // fall through to a disk-only snapshot
+            }
+        }
+        qmp.execute("blockdev-snapshot-internal-sync", {{"device", runningDiskDevice(qmp)}, {"name", snapshot}});
         return;
     }
     VmConfig cfg = repo_.load(vmName);
@@ -267,8 +299,13 @@ void QemuBackend::createSnapshot(const std::string& vmName, const std::string& s
 
 void QemuBackend::restoreSnapshot(const std::string& vmName, const std::string& snapshot) const {
     if (auto rt = repo_.loadRuntime(vmName)) {
+        bool hasMemory = false;
+        for (auto& s : listSnapshots(vmName))
+            if (s.name == snapshot) hasMemory = s.includesRam;
+        if (!hasMemory) throw Error("'" + snapshot + "' is a disk-only snapshot. Power off the VM to restore it.");
         QmpClient qmp;
         qmp.connect(rt->qmpPort);
+        qmp.setTimeout(std::chrono::minutes(2));
         qmp.humanCommand("loadvm " + snapshot);
         return;
     }
@@ -281,7 +318,7 @@ void QemuBackend::deleteSnapshot(const std::string& vmName, const std::string& s
     if (auto rt = repo_.loadRuntime(vmName)) {
         QmpClient qmp;
         qmp.connect(rt->qmpPort);
-        qmp.humanCommand("delvm " + snapshot);
+        qmp.execute("blockdev-snapshot-delete-internal-sync", {{"device", runningDiskDevice(qmp)}, {"name", snapshot}});
         return;
     }
     VmConfig cfg = repo_.load(vmName);
@@ -315,19 +352,6 @@ std::vector<SnapshotInfo> QemuBackend::listSnapshots(const std::string& vmName) 
         out.push_back(si);
     }
     return out;
-}
-
-GuestAgent QemuBackend::connectGuestAgent(const std::string& vmName) const {
-    VmRuntime rt = requireRunning(vmName);
-    GuestAgent agent;
-    try {
-        agent.connect(rt.qgaPort);
-    } catch (const Error& e) {
-        throw Error(std::string(e.what()) +
-                    "\nIs qemu-guest-agent installed and running inside '" + vmName +
-                    "'? (Linux: sudo apt install qemu-guest-agent && sudo systemctl start qemu-guest-agent)");
-    }
-    return agent;
 }
 
 }  // namespace eduvm

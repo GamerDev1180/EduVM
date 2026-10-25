@@ -22,8 +22,6 @@ std::string join(const std::vector<std::string>& parts, std::string_view sep);
 bool startsWith(std::string_view s, std::string_view prefix);
 bool endsWith(std::string_view s, std::string_view suffix);
 
-std::string base64Decode(std::string_view in);
-
 // UTC timestamp, e.g. 2026-10-19T21:18:00Z
 std::string nowIso8601();
 
