@@ -1,6 +1,0 @@
-#pragma once
-
-namespace eduvm {
-inline constexpr const char* kVersion = "@PROJECT_VERSION@";
-inline constexpr const char* kProductName = "EduVM";
-}
